@@ -400,6 +400,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
     OK(L"Kernel file opened");
 
     Elf64_Ehdr Header;
+    UINTN KernelFileSize = 0;
     {
         UINTN FileInfoSize = 0;
         EFI_FILE_INFO* FileInfo = NULL;
@@ -416,6 +417,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
 
         UINTN size = sizeof(Header);
         CHECK(Kernel->Read(Kernel, &size, &Header), L"Read(ELF header)");
+        KernelFileSize = FileInfo->FileSize;
         OK(L"File size: %ld bytes", (UINT64)FileInfo->FileSize);
     }
 
@@ -431,6 +433,9 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
 
     /* ---------- 阶段 2: 按 program header 装载段 ---------- */
     STAGE(L"Stage 2/5  Load kernel segments");
+    if (Header.e_phentsize != sizeof(Elf64_Phdr) || Header.e_phnum == 0) {
+        FatalMsg(L"Invalid program header table (bad e_phentsize/e_phnum)");
+    }
     Elf64_Phdr* Phdrs = NULL;
     CHECK(Kernel->SetPosition(Kernel, Header.e_phoff), L"SetPosition(phdrs)");
     {
@@ -447,6 +452,14 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
          Phdr = (Elf64_Phdr*)((CHAR8*)Phdr + Header.e_phentsize))
     {
         if (Phdr->p_type != PT_LOAD) continue;
+
+        if (Phdr->p_memsz == 0 || Phdr->p_filesz > Phdr->p_memsz) {
+            FatalMsg(L"Invalid PT_LOAD segment size (filesz > memsz or memsz == 0)");
+        }
+        if (Phdr->p_offset > KernelFileSize ||
+            Phdr->p_filesz > KernelFileSize - Phdr->p_offset) {
+            FatalMsg(L"PT_LOAD segment exceeds kernel file boundary");
+        }
 
         UINTN Pages = (Phdr->p_memsz + 0xFFF) / 0x1000;
         UINT64 Segment = Phdr->p_paddr ? Phdr->p_paddr : Phdr->p_vaddr;
